@@ -71,14 +71,14 @@ public class LagomJavaCodegen extends AbstractJavaCodegen {
 
     }
 
-//    @Override
-//    public CodegenOperation fromOperation(String path, String httpMethod, Operation operation, Map<String, Model> definitions, Swagger swagger) {
-//        CodegenOperation op = super.fromOperation(path, httpMethod, operation, definitions, swagger);
-//
-//        op.path = op.path.replaceAll("\\{([^}]*)\\}", ":$1");
-//
-//        return op;
-//    }
+    @Override
+    public CodegenOperation fromOperation(String path, String httpMethod, Operation operation, Map<String, Model> definitions, Swagger swagger) {
+        CodegenOperation op = super.fromOperation(path, httpMethod, operation, definitions, swagger);
+
+        op.path = op.path.replaceAll("\\{([^}]*)\\}", ":$1");
+
+        return op;
+    }
 
 
     @Override
@@ -104,22 +104,33 @@ public class LagomJavaCodegen extends AbstractJavaCodegen {
         return "lagom-service-descriptor";
     }
 
-//    @Override
-//    public void addOperationToGroup(String tag, String resourcePath, Operation operation, CodegenOperation co, Map<String, List<CodegenOperation>> operations) {
-//        super.addOperationToGroup(tag, resourcePath, operation, co, operations);
-//        String basePath = resourcePath;
-//        if (basePath.contains("/")) {
-//            String[] pathElements = basePath.split("/");
-//            basePath = "/" + pathElements[pathElements.length - 1];
-//        }
-//
-//        List<CodegenOperation> opList = operations.get(basePath);
-//        if (opList == null) {
-//            opList = new ArrayList<CodegenOperation>();
-//            operations.put(basePath, opList);
-//        }
-//        opList.add(co);
-//    }
+    @Override
+    public void addOperationToGroup(String tag, String resourcePath, Operation operation, CodegenOperation co, Map<String, List<CodegenOperation>> operations) {
+        String basePath = resourcePath;
+        if (basePath.startsWith("/")) {
+            basePath = basePath.substring(1);
+        }
+        int pos = basePath.indexOf("/");
+        if (pos > 0) {
+            basePath = basePath.substring(0, pos);
+        }
+
+        if (basePath == "") {
+            basePath = "default";
+        } else {
+            if (co.path.startsWith("/" + basePath)) {
+                co.path = co.path.substring(("/" + basePath).length());
+            }
+            co.subresourceOperation = !co.path.isEmpty();
+        }
+        List<CodegenOperation> opList = operations.get(basePath);
+        if (opList == null) {
+            opList = new ArrayList<CodegenOperation>();
+            operations.put(basePath, opList);
+        }
+        opList.add(co);
+        co.baseName = basePath;
+    }
 
     private boolean safeValue(Boolean value) {
         return value != null && value;
