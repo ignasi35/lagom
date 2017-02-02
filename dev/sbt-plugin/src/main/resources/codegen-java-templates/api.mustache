@@ -18,7 +18,7 @@ public interface {{classname}} extends Service {
     default Descriptor descriptor() {
         return named("{{classVarName}}").withCalls(
             {{#operation}}
-                restCall(Method.{{httpMethod}}, "{{basePathWithoutHost}}{{path}}{{#queryParams}}{{#-first}}?{{/-first}}{{paramName}}{{#hasMore}}&{{/hasMore}}{{/queryParams}}", this::{{operationId}}){{^-last}}, {{/-last}}
+                restCall(Method.{{httpMethod}}, "{{basePathWithoutHost}}/{{baseName}}{{path}}{{#queryParams}}{{#-first}}?{{/-first}}{{paramName}}{{#hasMore}}&{{/hasMore}}{{/queryParams}}", this::{{operationId}}){{^-last}}, {{/-last}}
             {{/operation}}
         );
     }
