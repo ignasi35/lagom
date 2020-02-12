@@ -19,8 +19,11 @@ import akka.stream.scaladsl
 import akka.util.Timeout
 import akka.Done
 import akka.NotUsed
+import akka.actor.ActorRef
 import com.lightbend.lagom.internal.persistence.ReadSideConfig
 import com.lightbend.lagom.internal.persistence.cluster.ClusterStartupTask
+import com.lightbend.lagom.internal.projection.ProjectionRegistryActor.WorkerCoordinates
+import com.lightbend.lagom.internal.projection.TelemetrySupportActor
 import com.lightbend.lagom.javadsl.persistence._
 
 import scala.compat.java8.FutureConverters._
@@ -28,7 +31,7 @@ import scala.concurrent.Future
 
 private[lagom] object ReadSideActor {
   def props[Event <: AggregateEvent[Event]](
-      tagName: String,
+                                             workerCoordinates: WorkerCoordinates,
       config: ReadSideConfig,
       clazz: Class[Event],
       globalPrepareTask: ClusterStartupTask,
@@ -37,7 +40,7 @@ private[lagom] object ReadSideActor {
   )(implicit mat: Materializer) =
     Props(
       new ReadSideActor[Event](
-        tagName,
+        workerCoordinates,
         config,
         clazz,
         globalPrepareTask,
@@ -53,7 +56,7 @@ private[lagom] object ReadSideActor {
  * Read side actor
  */
 private[lagom] class ReadSideActor[Event <: AggregateEvent[Event]](
-    tagName: String,
+                                                                    workerCoordinates: WorkerCoordinates,
     config: ReadSideConfig,
     clazz: Class[Event],
     globalPrepareTask: ClusterStartupTask,
@@ -67,6 +70,8 @@ private[lagom] class ReadSideActor[Event <: AggregateEvent[Event]](
   import context.dispatcher
 
   private var shutdown: Option[KillSwitch] = None
+  val tagName = workerCoordinates.tagName
+  var telemetrySupport: Option[ActorRef] = None
 
   override def postStop: Unit = {
     shutdown.foreach(_.shutdown())
@@ -92,6 +97,8 @@ private[lagom] class ReadSideActor[Event <: AggregateEvent[Event]](
           config.maxBackoff,
           config.randomBackoffFactor
         ) { () =>
+          // whenever the Source is restarted we must use a new incarnation of the telemetry support child actor
+          restartTelemetrySupport(workerCoordinates)
           val handler: ReadSideProcessor.ReadSideHandler[Event] = processorFactory().buildHandler()
           val futureOffset: Future[Offset]                      = handler.prepare(tag).toScala
 
@@ -101,7 +108,11 @@ private[lagom] class ReadSideActor[Event <: AggregateEvent[Event]](
             .flatMapConcat { offset =>
               val eventStreamSource = eventStreamFactory(tag, offset).asScala
               val usersFlow         = handler.handle()
-              eventStreamSource.via(usersFlow)
+              eventStreamSource
+                  .mapAsync(1){
+
+                  }
+                .via(usersFlow)
             }
         }
 
@@ -122,4 +133,12 @@ private[lagom] class ReadSideActor[Event <: AggregateEvent[Event]](
       // This actor will be restarted by WorkerCoordinator
       throw cause
   }
+
+  def restartTelemetrySupport(workerCoordinates: WorkerCoordinates): ActorRef = {
+    telemetrySupport.foreach { context.stop }
+    val newChild = context.actorOf(TelemetrySupportActor.props(workerCoordinates))
+    telemetrySupport = Some(newChild)
+    newChild
+  }
+
 }

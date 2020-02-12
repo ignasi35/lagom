@@ -10,6 +10,7 @@ import akka.stream.scaladsl.GraphDSL
 import akka.actor.Status
 import akka.stream.scaladsl.Source
 import akka.pattern.pipe
+import akka.pattern.ask
 import akka.stream.scaladsl.Flow
 
 import scala.concurrent.Future
@@ -37,13 +38,16 @@ import akka.actor.Actor
 import akka.stream.scaladsl.Zip
 import java.net.URI
 
+import akka.actor.ActorRef
 import akka.kafka.ProducerMessage
 import akka.stream.scaladsl.RestartSource
 import com.lightbend.lagom.internal.broker.kafka.TopicProducerActor.Start
+import com.lightbend.lagom.internal.projection.ProjectionRegistryActor.WorkerCoordinates
+import com.lightbend.lagom.internal.projection.TelemetrySupportActor
 
 private[lagom] object TopicProducerActor {
   def props[Message](
-      tagName: String,
+      workerCoordinates: WorkerCoordinates,
       kafkaConfig: KafkaConfig,
       producerConfig: ProducerConfig,
       locateService: String => Future[Seq[URI]],
@@ -51,11 +55,12 @@ private[lagom] object TopicProducerActor {
       eventStreamFactory: (String, Offset) => Source[(Message, Offset), _],
       partitionKeyStrategy: Option[Message => String],
       serializer: Serializer[Message],
-      offsetStore: OffsetStore
+      offsetStore: OffsetStore,
+      telemetrySideChannel: ActorRef
   )(implicit mat: Materializer, ec: ExecutionContext) =
     Props(
       new TopicProducerActor[Message](
-        tagName,
+        workerCoordinates,
         kafkaConfig,
         producerConfig,
         locateService,
@@ -63,7 +68,8 @@ private[lagom] object TopicProducerActor {
         eventStreamFactory,
         partitionKeyStrategy,
         serializer,
-        offsetStore
+        offsetStore,
+        telemetrySideChannel
       )
     )
 
@@ -76,7 +82,7 @@ private[lagom] object TopicProducerActor {
  * Kafka. See also ReadSideActor.
  */
 private[lagom] class TopicProducerActor[Message](
-    tagName: String,
+    workerCoordinates: WorkerCoordinates,
     kafkaConfig: KafkaConfig,
     producerConfig: ProducerConfig,
     locateService: String => Future[Seq[URI]],
@@ -84,13 +90,17 @@ private[lagom] class TopicProducerActor[Message](
     eventStreamFactory: (String, Offset) => Source[(Message, Offset), _],
     partitionKeyStrategy: Option[Message => String],
     serializer: Serializer[Message],
-    offsetStore: OffsetStore
+    offsetStore: OffsetStore,
+    telemetrySideChannel: ActorRef
 )(implicit mat: Materializer, ec: ExecutionContext)
     extends Actor
     with ActorLogging {
 
   /** Switch used to terminate the on-going stream when this actor is stopped.*/
   private var shutdown: Option[KillSwitch] = None
+
+  val tagName                            = workerCoordinates.tagName
+  var telemetrySupport: Option[ActorRef] = None
 
   override def postStop(): Unit = {
     shutdown.foreach(_.shutdown())
@@ -109,6 +119,8 @@ private[lagom] class TopicProducerActor[Message](
           producerConfig.maxBackoff,
           producerConfig.randomBackoffFactor
         ) { () =>
+          // whenever the Source is restarted we must use a new incarnation of the telemetry support child actor
+          restartTelemetrySupport(workerCoordinates)
           val brokersAndOffset: Future[(String, OffsetDao)] = eventualBrokersAndOffset(tagName)
           Source
             .future(brokersAndOffset)
@@ -119,7 +131,14 @@ private[lagom] class TopicProducerActor[Message](
                 log.debug("Kafka service {} located at URIs [{}] for producer of [{}]", serviceName, endpoints, topicId)
                 val eventStreamSource: Source[(Message, Offset), _]       = eventStreamFactory(tagName, offset.loadedOffset)
                 val usersFlow: Flow[(Message, Offset), Future[Done], Any] = eventsPublisherFlow(endpoints, offset)
-                eventStreamSource.via(usersFlow)
+                eventStreamSource
+                    .mapAsync(1){ case (msg, lagomOffset) =>
+                      telemetrySupport.map{ ref =>
+                        ref ? TelemetrySupportActor.Start(msg, correlationId,eventTimestamp)
+
+                      }
+                    }
+                  .via(usersFlow)
             }
         }
       }
@@ -142,6 +161,13 @@ private[lagom] class TopicProducerActor[Message](
       // Crash if the globalPrepareTask or the event stream fail
       // This actor will be restarted by WorkerCoordinator
       throw e
+  }
+
+  def restartTelemetrySupport(workerCoordinates: WorkerCoordinates): ActorRef = {
+    telemetrySupport.foreach { context.stop }
+    val newChild = context.actorOf(TelemetrySupportActor.props(workerCoordinates))
+    telemetrySupport = Some(newChild)
+    newChild
   }
 
   /**
